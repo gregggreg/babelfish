@@ -1,4 +1,4 @@
-# babelfish
+# babelfish.py
 Proof of concept python script that listens to an audio stream and translates any speech into English using a realistic-sounding voice. Uses OpenAI's whisper model for transcription and translation and TTS for voices. Translate YouTube videos, Zoom calls, or any audio into English in near real-time.
 
 ## Steps to install and run

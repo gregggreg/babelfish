@@ -12,34 +12,34 @@ Use `python3 -m sounddevice` to list devices.
 """
 import argparse
 import io
+import logging
 import os
 import queue
+import sys
 import threading
 import whisper
 import sounddevice as sd
 import soundfile as sf
+import numpy as np
 from pathlib import Path
 from openai import OpenAI
 from scipy.io.wavfile import write
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--input_device', type=int, default=1, help='Input device ID. Use `python3 -m sounddevice` to list devices.')
-parser.add_argument('--output_device', type=int, default=3, help='Output device ID. Use `python3 -m sounddevice` to list devices.')
-parser.add_argument('--voice', type=str, default="alloy", help='Voice to use for translation. Options: alloy, echo, fable, onyx, nova, or shimmer')
-parser.add_argument('--local_translate', type=bool, default=False, help='Translate with local whisper model.')
-parser.add_argument('--local_translate_model', type=str, default="large-v3", help='Local whisper model to use.')
+parser.add_argument('-i', '--input_device', type=int, default=1, help='Input device ID. Use `python3 -m sounddevice` to list devices.')
+parser.add_argument('-o', '--output_device', type=int, default=3, help='Output device ID. Use `python3 -m sounddevice` to list devices.')
+parser.add_argument('-v', '--voice', type=str, default="alloy", help='Voice to use for translation. Options: alloy, echo, fable, onyx, nova, or shimmer')
+parser.add_argument('-t', '--local_translate', type=bool, default=False, help='Translate with local whisper model.')
+parser.add_argument('-m', '--local_translate_model', type=str, default="large-v3", help='Local whisper model to use.')
+parser.add_argument('-s', '--chunk_seconds', type=int, default=5, help='Number of seconds for each audio chunk.')
 
 args = parser.parse_args()
 
-input_device = args.input_device
-output_device = args.output_device
-local_translate = args.local_translate
-local_translate_model = args.local_translate_model
-voice = args.voice
+logging.basicConfig(stream=sys.stderr, level=logging.CRITICAL)
 
 client = OpenAI()
-if local_translate:
-    model = whisper.load_model(local_translate_model)
+if args.local_translate:
+    model = whisper.load_model(args.local_translate_model)
 current_frame = 0
 translate_queue = queue.Queue()
 
@@ -49,13 +49,14 @@ def worker():
         if item is None:
             break
         filename = item
-        if local_translate:
+        if args.local_translate:
             translate_audio_local(filename)
         else:
             translate_audio_remote(filename)
         translate_queue.task_done()
 
 worker_thread = threading.Thread(target=worker)
+worker_thread.daemon = True
 worker_thread.start()
 
 def write_audio(data, samplerate, filename):
@@ -63,35 +64,37 @@ def write_audio(data, samplerate, filename):
     translate_queue.put(filename)
 
 def load_audio():
-    print("Recording audio...")
-    fs = 16000  # Sample rate
-    seconds = 3  # Duration of recording
+    logging.debug("Recording audio...")
+    fs = 24000  # Sample rate
+    seconds = args.chunk_seconds  # Duration of recording
     uuid = os.urandom(16).hex()
     filename = "/tmp/" + uuid + ".wav"
-    myrecording = sd.rec(int(seconds * fs), samplerate=fs, channels=1, device=input_device)
+    myrecording = sd.rec(int(seconds * fs), samplerate=fs, channels=1, device=args.input_device)
     sd.wait()  # Wait until recording is finished
     write_thread = threading.Thread(target=write_audio, args=(myrecording,fs,filename,))
     write_thread.start()
     return filename
 
-def output_audio(text):
+def output_audio(text, filename):
     global current_frame
     current_frame = 0
- 
+    text = text.strip()
     if len(text) > 0:
+        print(text)
         response = client.audio.speech.create(
 	        model="tts-1",
-	        voice=voice,
+	        voice=args.voice,
 	        input=text
 	    )
         data, samplerate = sf.read(io.BytesIO(response.content), always_2d=True)
+        original, originalRate = sf.read(filename, frames=len(data), fill_value=0)
+        combined_data = np.column_stack([data, original * 0.05])
+        os.remove(filename)
 
         def callback(outdata, frames, time, status):
             global current_frame
-            if status:
-                print(status)
-            chunksize = min(len(data) - current_frame, frames)
-            outdata[:chunksize] = data[current_frame:current_frame + chunksize]
+            chunksize = min(len(combined_data) - current_frame, frames)
+            outdata[:chunksize] = combined_data[current_frame:current_frame + chunksize]
             if chunksize < frames:
                 outdata[chunksize:] = 0
                 raise sd.CallbackStop()
@@ -99,34 +102,38 @@ def output_audio(text):
 
         def stream_audio(samplerate, channels, callback):
             event = threading.Event()
-            stream = sd.OutputStream(samplerate=samplerate, channels=channels, device=output_device, 
+            stream = sd.OutputStream(samplerate=samplerate, channels=channels, device=args.output_device, 
                                      callback=callback, finished_callback=event.set)
             with stream:
                 event.wait()  # Keep waiting for the stream to finish
 
-        stream_audio(samplerate, data.shape[1], callback)
+        stream_audio(samplerate, combined_data.shape[1], callback)
     else:
         print("(No text to translate)")
 
 def translate_audio_remote(filename):
-    print("Transcribing audio remotely...")
+    logging.debug("Transcribing audio remotely...")
     text = client.audio.translations.create(
-        model="whisper-1", 
+        model="whisper-1",
         file=Path(filename),
         response_format="text"
     )
-    print(text)
-    output_audio(text)
-    os.remove(filename)
+    output_audio(text, filename)
 
 def translate_audio_local(filename):   
-    print("Transcribing audio locally...")
-    response = model.transcribe(filename, task="translate")
+    logging.debug("Transcribing audio locally...")
+    response = model.transcribe(
+        filename,
+        task="translate"
+    )
     text = response["text"]
-    print(text)
-    output_audio(text)
-    os.remove(filename)
+    output_audio(text, filename)
 
-while True:
-    load_audio()
-
+try:
+    while True:
+        load_audio()
+except KeyboardInterrupt:
+    translate_queue.put(None)
+    parser.exit()
+except Exception as e:
+    parser.exit(type(e).__name__ + ': ' + str(e))
