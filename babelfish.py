@@ -2,24 +2,12 @@
 """Records audio, translates it to English, and speaks the text 
 using a realistic-sounding human voice.
 
-NumPy and the soundfile module (https://python-soundfile.readthedocs.io/)
-must be installed for this to work.
+openai, scipy, sounddevice, soundfile modules must be installed for this to work.
+whisper module must be installed for local translation.
 
-This example program loads the whole file into memory before starting
-playback.
-To play very long files, you should use play_long_file.py instead.
+set OPENAI_API_KEY environment variable to your API key.
 
-This example could simply be implemented like this::
-
-    import sounddevice as sd
-    import soundfile as sf
-
-    data, fs = sf.read('my-file.wav')
-    sd.play(data, fs)
-    sd.wait()
-
-... but in this example we show a more low-level implementation
-using a callback stream.
+Use `python3 -m sounddevice` to list devices.
 
 """
 import argparse
@@ -27,7 +15,6 @@ import io
 import os
 import queue
 import threading
-import warnings
 import whisper
 import sounddevice as sd
 import soundfile as sf
@@ -40,18 +27,19 @@ parser.add_argument('--input_device', type=int, default=1, help='Input device ID
 parser.add_argument('--output_device', type=int, default=3, help='Output device ID. Use `python3 -m sounddevice` to list devices.')
 parser.add_argument('--voice', type=str, default="alloy", help='Voice to use for translation. Options: alloy, echo, fable, onyx, nova, or shimmer')
 parser.add_argument('--local_translate', type=bool, default=False, help='Translate with local whisper model.')
+parser.add_argument('--local_translate_model', type=str, default="large-v3", help='Local whisper model to use.')
 
 args = parser.parse_args()
 
 input_device = args.input_device
 output_device = args.output_device
 local_translate = args.local_translate
+local_translate_model = args.local_translate_model
 voice = args.voice
 
 client = OpenAI()
 if local_translate:
-    model = whisper.load_model("large-v3")
-    warnings.filterwarnings("ignore")
+    model = whisper.load_model(local_translate_model)
 current_frame = 0
 translate_queue = queue.Queue()
 
